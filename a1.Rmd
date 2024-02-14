@@ -1,0 +1,375 @@
+---
+title: "Assignment 1: Data Set Selection and Initial Processing"
+author: "Vishali Umaiyalan"
+output:
+  html_document:
+    toc: true
+    toc_depth: 6
+bibliography: a1.bib
+csl: biomed-central.csl
+---
+
+# 0. Libraries
+```{r, message=FALSE}
+require(GEOquery)
+require(data.table)
+require(edgeR)
+require(biomaRt)
+require(ggplot2)
+require(gridExtra)
+```
+
+# 1. Introduction to chosen dataset
+The chosen dataset comes from "Integrated functional genomic analyses of Klinefelter and Turner syndromes reveal global network effects of altered X chromosome dosage" which was published in February, 2020 by Zhang et. al. The authors of this paper were interested in differential expression between control individuals and individuals either Klinefelter or Turner syndrom (KS and TS, respectively). KS occurs in males when they are born with an extra X chromosome (i.e. XXY). On the other hand, TS occurs in females when they are born missing an X chromosome (i.e. XO).
+
+# 2. Download and analyze the data
+```{r}
+# Get the author's summary for the chosen data set
+geo_id <- "GSE126712"
+gse <- suppressMessages(getGEO(GEO = geo_id, 
+                                 GSEMatrix = FALSE))
+gse@header$summary[1]
+```
+```{r}
+# Download the expression data
+
+# Create a data folder in the current working directory
+dest_dir <- file.path(getwd(), "data")
+if (! dir.exists(dest_dir)) {
+  dir.create(dest_dir)
+}
+
+file_names <- getGEOSuppFiles(geo_id, 
+                              makeDirectory = FALSE, 
+                              fetch_files = FALSE)
+file_names$fname
+
+raw_file_path <- file.path(dest_dir, file_names$fname)
+
+# There is only one file associated with this dataset
+# Download the file in the data directory that was created in the previous step
+if (! file.exists(raw_file_path)){
+  sfiles <- getGEOSuppFiles(GEO = geo_id,
+                            makeDirectory = FALSE,
+                            baseDir = dest_dir,
+                            fetch_files = TRUE)
+  # Unzip the .tar file
+  untar(raw_file_path, exdir = dest_dir)
+}
+```
+
+# 3. Clean the data
+```{r}
+# The original downloaded data as counts for each individual are stored in 
+# separate files. Each file has these coloumns: gene_id, transcript_ids, length,
+# effective_length, expected_count, TPM, and FPKM. Combine all the data files
+# into one count matrix where each row is the gene, each column is the sample,
+# and each cell stores the expected_count for the gene in that sample. 
+
+# A helper function: add a sample name column to the dataframe that is stored
+# at the given file path
+add_name_to_counts <- function(file_path, sample_name) {
+  df <- fread(file_path, select = c("gene_id", "expected_count"))
+  df$sample <- sample_name
+  return(df)
+}
+
+# Check if this step has already been done
+if (file.exists("data/original_combined_counts.rds")) {
+  combined_counts <- readRDS("data/original_combined_counts.rds")
+} else {
+  # List all the count files (should have 54 since there are 54 donors in the study)
+  count_files <- list.files(dest_dir, 
+                            pattern = "genes.results.txt.gz$", 
+                            full.names = TRUE)
+  
+  # Initialize an empty list to store multiple data frames
+  df_list <- list()
+  
+  # Loop through each file, read, and store in list
+  for (file_path in count_files) {
+    sample_name <- gsub(".*_(.*)\\.genes\\.results\\.txt\\.gz$", 
+                        "\\1", 
+                        basename(file_path))
+    df_list[[sample_name]] <- add_name_to_counts(file_path, 
+                                                 sample_name)
+  }
+  
+  # Combine all data.tables into one 
+  combined_df <- rbindlist(df_list, 
+                           use.names = TRUE, 
+                           fill = TRUE)
+  
+  # Reshape to wide format and convert to a matrix
+  wide_df <- dcast(combined_df, gene_id ~ sample, value.var = "expected_count")
+  row.names(wide_df) <- wide_df$gene_id
+  
+  # Remove the gene coloumn and adds gene names as rownames in the matrix
+  combined_counts <- data.matrix(wide_df[, -1], )
+  row.names(combined_counts) <- wide_df$gene_id
+  
+  saveRDS(combined_counts, "data/original_combined_counts.rds")
+}
+```
+
+```{r}
+# Each sample is a unique number. Add the condition to the sample name
+
+# IDs for individuals with Turner's syndrome
+ts_ids <- c("13880", "14307", "14356", "14552", "14465", "14782", "15190", 
+            "15830", "15938", "18447", "18463", "18825", "18968", "19484")
+
+# IDs for individuals with Klienfelter's syndrome
+ks_ids <- c("18411", "18419", "18452", "18466", "18499", "18525", "18632", 
+            "18833", "18886", "19150", "19197", "19355", "19360")
+
+# IDs for female controls
+control_female_ids <- c("14356", "15622", "16054", "18076", "18102", "18226", 
+                        "18426", "18501", "18576", "19117", "19293", "19406",
+                        "19426", "19630")
+
+# IDs for male controls
+control_male_ids <- c("15915", "16053", "17972", "18465", "18467", "18665", 
+                      "18707", "18805", "19018", "19169", "19170", "19198", 
+                      "19361")
+
+current_sample_names <- colnames(combined_counts)
+updated_sample_names <- current_sample_names
+
+# Update sample names based on condition using the id mappings above
+for (i in seq_along(current_sample_names)) {
+  sample_id <- current_sample_names[i]
+  
+  if (sample_id %in% ts_ids) {
+    updated_sample_names[i] <- paste(sample_id, "TS", sep = "_")
+  } else if (sample_id %in% ks_ids) {
+    updated_sample_names[i] <- paste(sample_id, "KS", sep = "_")
+  } else if (sample_id %in% control_female_ids) {
+    updated_sample_names[i] <- paste(sample_id, "control_female", sep = "_")
+  } else if (sample_id %in% control_male_ids) {
+    updated_sample_names[i] <- paste(sample_id, "control_male", sep = "_")
+  }
+}
+
+colnames(combined_counts) <- updated_sample_names
+```
+
+```{r}
+# Summarize the number of individuals in each group in the data
+num_ts <- length(ts_ids)
+num_ks <- length(ks_ids)
+num_control_female <- length(control_female_ids)
+num_control_male <- length(control_male_ids)
+
+sample_condition_counts <- data.frame(
+  condition = c("Turner's Syndrome", "Klinefelter's Syndrome", "Female Controls", "Male Controls"),
+  number_of_samples = c(num_ts, num_ks, num_control_female, num_control_male)
+)
+
+sample_condition_counts
+```
+
+```{r}
+# The gene names are already mapped to HUGO gene symbols, but they are combined
+# with the Ensembl gene identifiers (e.g. ensemblID_HUGO) Extract the HUGO gene 
+# symbols and make these gene symbols the row names in the counts matrix
+current_row_names <- rownames(combined_counts)
+HUGO_names <- sapply(strsplit(current_row_names, "_", fixed = TRUE), 
+                     function(x) x[2])
+ensembl_ids_version <- sapply(strsplit(current_row_names, "_", fixed = TRUE),
+                              function(x) x[1])
+ensembl_ids <- sapply(ensembl_ids_version, function(x) sub("\\..*", "", x))
+
+
+# Manually convert the ensembl gene IDs to the HUGO gene symbol 
+# Use the ensembl gene IDs without the version to avoid filtering more genes
+conversion_stash <- "data/id_conversion.rds"
+
+ensembl <- useDataset("hsapiens_gene_ensembl", mart = useMart("ensembl"))
+
+if (file.exists(conversion_stash)) {
+  id_conversion <- readRDS(conversion_stash)
+} else {
+  id_conversion <- getBM(attributes = c("ensembl_gene_id", "hgnc_symbol"),
+                         filters = c("ensembl_gene_id"), 
+                         values = ensembl_ids, 
+                         mart = ensembl)
+  saveRDS(id_conversion, conversion_stash)
+}
+
+# Convert the counts matrix into a data frame object for now
+combined_counts_df <- as.data.frame(combined_counts)
+combined_counts_df$ensembl_ids <- ensembl_ids
+combined_counts_df$HUGO_names <- HUGO_names
+
+# Add the HUGO symbols that were found manually
+combined_counts_df <- merge(combined_counts_df, 
+                            id_conversion, 
+                            by.x = "ensembl_ids", 
+                            by.y = "ensembl_gene_id", 
+                            all.x = TRUE)
+
+# Only keep the rows where the original HUGO gene symbol matches with the
+# manually found HUGO symbol
+combined_counts_df <- combined_counts_df[combined_counts_df$HUGO_names == combined_counts_df$hgnc_symbol, ]
+combined_counts_df<- subset(combined_counts_df, hgnc_symbol != "" &
+                              !is.na(hgnc_symbol))
+
+# Convert back to a matrix
+row_names_for_matrix <- combined_counts_df$hgnc_symbol
+combined_counts_df <- combined_counts_df[, !(names(combined_counts_df) %in% 
+                                               c("ensembl_ids", "HUGO_names", "hgnc_symbol"))]
+combined_counts <- as.matrix(combined_counts_df)
+rownames(combined_counts) <- row_names_for_matrix
+```
+
+```{r}
+# Filter out genes with low counts
+min_num_samples <- 3
+keep <- rowSums(cpm(combined_counts) >1) > min_num_samples
+filtered_counts <- combined_counts[keep, ]
+```
+
+```{r}
+# Check if some genes have multiple rows
+nrow(filtered_counts) == length(unique(rownames(filtered_counts))) # TRUE
+```
+
+
+```{r}
+# Make boxplots for individuals in each condition to determine if there are 
+# any outliers
+counts_cpm <- cpm(filtered_counts, log = TRUE)
+long_counts <- suppressWarnings(melt(as.matrix(counts_cpm)))
+colnames(long_counts) <- c("Gene", "Sample", "Expression")
+long_counts$Condition <- gsub(".*_(.*)$", "\\1", long_counts$Sample)
+
+# Convert data to separate dataframes for easy plotting
+data_female_control <- subset(long_counts, Condition == "female")
+data_male_control <- subset(long_counts, Condition == "male")
+data_ts <- subset(long_counts, Condition == "TS")
+data_ks <- subset(long_counts, Condition == "KS")
+
+p_female_control <- ggplot(data_female_control, aes(x = Sample, y = Expression)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Filtered (Original) Counts for Female Controls", x = "Sample", y = "Log2 CPM")
+p_female_control
+
+p_male_control <- ggplot(data_male_control, aes(x = Sample, y = Expression)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Filtered (Original) Counts for Male Controls", x = "Sample", y = "Log2 CPM")
+p_male_control
+
+# Plot for Turner's Syndrome
+p_ts <- ggplot(data_ts, aes(x = Sample, y = Expression)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Filtered (Original) Counts for Turner's Syndrome", x = "Sample", y = "Log2 CPM")
+p_ts
+
+# Plot for Klinefelter's Syndrome
+p_ks <- ggplot(data_ks, aes(x = Sample, y = Expression)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Filtered (Original) Counts for Klinefelter's Syndrome", x = "Sample", y = "Log2 CPM")
+p_ks
+```
+
+# 4. Normalize the data
+```{r}
+d <- DGEList(counts = filtered_counts)
+d <- calcNormFactors(d)
+
+normalized_counts <- cpm(d)
+
+# Save the normalized counts so we do not have to re-run this analysis later
+saveRDS(normalized_counts, file = "data/normalized_counts.rds")
+```
+
+```{r}
+# Make boxplots for individuals in each condition to determine if there are 
+# any outliers
+normalized_counts_cpm <- cpm(normalized_counts, log = TRUE)
+long_counts_normalized <- suppressWarnings(melt(as.matrix(normalized_counts_cpm)))
+colnames(long_counts_normalized) <- c("Gene", "Sample", "Expression")
+long_counts_normalized$Condition <- gsub(".*_(.*)$", "\\1", long_counts_normalized$Sample)
+
+# Convert data to separate dataframes for easy plotting
+data_female_control <- subset(long_counts_normalized, Condition == "female")
+data_male_control <- subset(long_counts_normalized, Condition == "male")
+data_ts <- subset(long_counts_normalized, Condition == "TS")
+data_ks <- subset(long_counts_normalized, Condition == "KS")
+
+p_female_control <- ggplot(data_female_control, aes(x = Sample, y = Expression)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Filtered (Normalized) Counts for Female Controls", x = "Sample", y = "Log2 CPM")
+p_female_control
+
+p_male_control <- ggplot(data_male_control, aes(x = Sample, y = Expression)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Filtered (Normalized) Counts for Male Controls", x = "Sample", y = "Log2 CPM")
+p_male_control
+
+# Plot for Turner's Syndrome
+p_ts <- ggplot(data_ts, aes(x = Sample, y = Expression)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Filtered (Normalized) Counts for Turner's Syndrome", x = "Sample", y = "Log2 CPM")
+p_ts
+
+# Plot for Klinefelter's Syndrome
+p_ks <- ggplot(data_ks, aes(x = Sample, y = Expression)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Filtered (Normalized) Counts for Klinefelter's Syndrome", x = "Sample", y = "Log2 CPM")
+p_ks
+```
+```{r}
+# Plot the smoothing density of the log2 CPM counts for the original and normalized
+# data 
+p_original <- ggplot(long_counts, aes(x = Expression, color = Sample)) +
+  geom_density() +
+  labs(title = "Original Count", x = NULL, y = "Smoothing density of log2 CPM ") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+p_normalized <- ggplot(long_counts_normalized, aes(x = Expression, color = Sample)) +
+  geom_density() +
+  labs(title = "Normalized Count", x = NULL, y = "Smoothing density of log2 CPM") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+grid.arrange(p_original, p_normalized, ncol = 2)
+```
+
+# 5. Interpret and document
+1. Why is the dataset of interest to you?
+The dataset is of interest to me because I think it can provide insights into how the X chromosome impacts gene expression. In TS, individuals are missing one X chromosome, while in KS, individuals have an extra X chromosome. If there is differential expression between controls and individuals with KS or TS, we might predict that the X chromosome has an impact (e.g. regulates) on the genes that are differentially expressed. Further, it would also be interesting to determine if the differences in X chromosome copy number correlate with changes in gene expression for genes on not only the X chromosome, but also autosomal genes. 
+
+2. What are the control and test conditions of the dataset?
+The are two control groups: 'healthy' males and 'healthy' females. Similarly, there are two test condition groups: females with Turners Syndrome and males with Klienfelters Syndrome. It would make sense to differential expression between the control males and the males with KS, or between the control females and the females with TS.
+
+3. How many samples in each of the conditions of your dataset?
+There are 14 females with TS, 14 female controls, 13 males with KS, and 13 male controls. 
+
+4. Were there expression values that could not be mapped to current HUGO symbols?
+The original dataset had already been mapped to HUGO symbols. However, there were some HUGO symbols that appeared inaccurate. For example, there was a gene with the symbol 'Y' in the original dataset. There were also some genes that did not seem to follow normal HUGO numenclature, such as only including uppercase characters. For that reason, I manually determined HUGO symbols using the biomaRt package. Then, I filtered the data to only include the genes where the original HUGO symbols and the manually determined HUGO symbols matched. This removed about 20000 genes out of 60498.
+
+5. Were there expression values that were not unique for specific genes? How did you handle these?
+After filtering out genes without HUGO symbols, there were 3 genes that appeared twice. However, for all 3 genes, one row would be 0 for all samples. Therefore, I did not remove these genes, but when I filtered the data based on low counts, these rows were removed.
+
+6. Were there any outliers in your dataset? How were they handled in the originating paper? How many outliers were removed?
+There were some outliers in the dataset that can be seen in the boxplots. However, each individual had at least a couple outliers, so for that reason no outlier genes were removed. In the original paper, no outliers were removed either. 
+
+7. How did you handle replicates?
+There were no technical replicates in the dataset. There are a total of 54 samples and each sample came from a different individual. Samples were normalized using TMM. 
+
+8. What is the final coverage of your dataset?
+There were 60498 genes to begin with, but after filtering out genes did not have HUGO gene symbols, and genes there were not expressed at more than 1 count per million (CPM) in at least 3 samples, there were 13458 genes left, making the coverage 22%.
+
+# 6. References
+@GEOquery @data_table @edgeR @biomaRt @ggplot2 @gridExtra @data
