@@ -5,3 +5,4 @@ Link to my wiki: https://github.com/bcb420-2024/Vishali_Umaiyalan/wiki
 
 # Assignments
 **A1**: https://github.com/bcb420-2024/Vishali_Umaiyalan/blob/main/a1/a1_VishaliUmaiyalan.html
+**A2**: https://github.com/bcb420-2024/Vishali_Umaiyalan/blob/main/a2_VishaliUmaiyalan.html
